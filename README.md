@@ -91,6 +91,34 @@ Same as Flavor 1, but the `network_attachment` URI points to the Host project.
 
 ---
 
+## Testing Internet Egress via Proxy
+
+If your agent needs to access the public internet but is restricted to the VPC via PSC, you can route traffic through a proxy running in your VPC.
+
+### Step 1: Add a Proxy Tool to your Agent
+
+Add a tool like this to your agent's code:
+
+```python
+def test_proxy_connectivity(target_url: str, proxy_ip: str = "10.1.0.2", port: int = 8080):
+    """Test connectivity to a URL via a proxy."""
+    proxies = {
+        "http": f"http://{proxy_ip}:{port}",
+        "https": f"http://{proxy_ip}:{port}",
+    }
+    try:
+        r = requests.get(target_url, proxies=proxies, timeout=5)
+        return f"SUCCESS: Reached {target_url} via proxy. Status: {r.status_code}"
+    except Exception as e:
+        return f"FAILED: Unable to reach {target_url} via proxy. Error: {e}"
+```
+
+### Step 2: Verify Connectivity
+Invoke the agent asking it to use the tool to reach a public URL (e.g., `http://google.com`).
+
+*   **If it fails with Timeout to the proxy IP:** Check if the proxy is running and listening on the specified port, and that firewall rules allow traffic from the PSC subnet.
+*   **If it fails with Connection Refused from the proxy:** The proxy is reachable but rejecting the connection. Check proxy logs.
+
 ## Troubleshooting
 
 *   **Error 500:** Often implies a failure in validating the PSC configuration or missing API enablement in the host project.
