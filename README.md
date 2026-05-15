@@ -87,7 +87,30 @@ In the **Host project**, grant the Guest project's service agent permission to u
     ```
 
 ### Step 3: Deployment Code
-Same as Flavor 1, but the `network_attachment` URI points to the Host project.
+Use the Python SDK to deploy. You must grant the `dns.peer` role as shown in Step 2 for this to work.
+
+```python
+import vertexai
+from vertexai import agent_engines
+from vertexai.agent_engines import aip_types
+
+vertexai.init(project="GUEST_PROJECT_ID", location="REGION")
+
+deployed_agent = agent_engines.create(
+    agent_engine=your_agent,
+    requirements="requirements.txt",
+    psc_interface_config=aip_types.PscInterfaceConfig(
+        network_attachment="projects/HOST_PROJECT_ID/regions/REGION/networkAttachments/ATTACHMENT_NAME",
+        dns_peering_configs=[
+            aip_types.DnsPeeringConfig(
+                domain="your-domain.com.", # Must end with a dot
+                target_project="HOST_PROJECT_ID",
+                target_network="HOST_VPC_NAME"
+            )
+        ]
+    )
+)
+```
 
 ---
 
