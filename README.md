@@ -1,23 +1,23 @@
-# Guide: Deploying Vertex AI Reasoning Engine with PSC
+# Guide: Deploying Vertex AI Reasoning Engine with PSC and DNS Peering
 
-This guide summarizes the steps required to successfully deploy a Vertex AI Reasoning Engine (Agent Runtime) with Private Service Connect (PSC) interfaces. It covers two flavors:
-1.  **Flavor 1:** Network Attachment in the same project (Guest Project).
-2.  **Flavor 2:** Network Attachment in a separate project (Host Project).
+This guide summarizes the steps required to successfully deploy a Vertex AI Reasoning Engine (Agent Runtime) with Private Service Connect (PSC) interfaces and DNS peering.
 
 ## The Problem
 
-When deploying a Reasoning Engine with `psc_interface_config`, you may encounter generic `500 Internal Server Error` or `403 Permission Denied` errors due to missing service agents or permissions.
+When deploying a Reasoning Engine with `psc_interface_config`, you may encounter generic `500 Internal Server Error` or `403 Permission Denied` errors due to missing service agents or permissions. This guide explains how to set up networking, DNS, and proxy configurations to avoid these issues.
 
 ---
 
-## Flavor 1: Network Attachment in Guest Project (Same-Project)
+## Section 1: Networking (Flavor 1 and Flavor 2)
+
+### Flavor 1: Network Attachment in Guest Project (Same-Project)
 
 This is the simpler case where the Network Attachment resides in the same project where you are deploying the Reasoning Engine.
 
-### Step 1: Enable APIs
+#### Step 1: Enable APIs
 Ensure `aiplatform.googleapis.com` and `cloudbuild.googleapis.com` are enabled in your project.
 
-### Step 2: Grant Permissions to Vertex AI Service Agent
+#### Step 2: Grant Permissions to Vertex AI Service Agent
 The general Vertex AI service agent needs permission to get the network attachment.
 
 1.  Identify your project number.
@@ -29,7 +29,7 @@ gcloud projects add-iam-policy-binding PROJECT_ID \
     --role="roles/compute.networkUser"
 ```
 
-### Step 3: Deployment Code
+#### Step 3: Deployment Code
 ```python
 import vertexai
 from vertexai import agent_engines
@@ -46,13 +46,11 @@ deployed_agent = agent_engines.create(
 )
 ```
 
----
-
-## Flavor 2: Network Attachment in Host Project (Cross-Project)
+### Flavor 2: Network Attachment in Host Project (Cross-Project)
 
 This is the case where the Network Attachment resides in a separate Host project (e.g., Shared VPC setup).
 
-### Step 1: Configure the Host Project
+#### Step 1: Configure the Host Project
 These steps must be performed in the **Host project**.
 
 1.  **Enable the Vertex AI API**:
@@ -75,7 +73,7 @@ These steps must be performed in the **Host project**.
         --role="roles/compute.networkAdmin"
     ```
 
-### Step 2: Configure Permissions for the Guest Service Agent
+#### Step 2: Configure Permissions for the Guest Service Agent
 In the **Host project**, grant the Guest project's service agent permission to use the network attachment.
 
 1.  Grant `roles/compute.networkUser` to the Guest project's service agent: `service-GUEST_PROJECT_NUMBER@gcp-sa-aiplatform.iam.gserviceaccount.com`.
@@ -86,41 +84,55 @@ In the **Host project**, grant the Guest project's service agent permission to u
         --role="roles/compute.networkUser"
     ```
 
-### Step 3: Deployment Code
-Use the Python SDK to deploy. You must grant the `dns.peer` role as shown in Step 2 for this to work.
-
-```python
-import vertexai
-from vertexai import agent_engines
-from vertexai.agent_engines import aip_types
-
-vertexai.init(project="GUEST_PROJECT_ID", location="REGION")
-
-deployed_agent = agent_engines.create(
-    agent_engine=your_agent,
-    requirements="requirements.txt",
-    psc_interface_config=aip_types.PscInterfaceConfig(
-        network_attachment="projects/HOST_PROJECT_ID/regions/REGION/networkAttachments/ATTACHMENT_NAME",
-        dns_peering_configs=[
-            aip_types.DnsPeeringConfig(
-                domain="your-domain.com.", # Must end with a dot
-                target_project="HOST_PROJECT_ID",
-                target_network="HOST_VPC_NAME"
-            )
-        ]
-    )
-)
-```
+#### Step 3: Deployment Code
+Same as Flavor 1, but the `network_attachment` URI points to the Host project.
 
 ---
 
-## Testing Internet Egress via Proxy
+## Section 2: DNS Configuration & Limitations
 
-If your agent needs to access the public internet but is restricted to the VPC via PSC, you can route traffic through a proxy running in your VPC.
+To enable the Reasoning Engine to resolve domains hosted in your target network's Cloud DNS, you must configure DNS peering.
+
+### Deployment Code with DNS Peering
+
+Add `dns_peering_configs` to your `PscInterfaceConfig`:
+
+```python
+        psc_interface_config=aip_types.PscInterfaceConfig(
+            network_attachment="projects/HOST_PROJECT_ID/regions/REGION/networkAttachments/ATTACHMENT_NAME",
+            dns_peering_configs=[
+                aip_types.DnsPeeringConfig(
+                    domain="your-domain.com.", # Must end with a dot
+                    target_project="HOST_PROJECT_ID",
+                    target_network="HOST_VPC_NAME"
+                )
+            ]
+        )
+```
+
+### Critical Limitation
+
+> [!IMPORTANT]
+> When PSC and DNS peering are enabled for a Reasoning Engine, **only domains that resolve to an RFC 1918 private IP address will work**.
+>
+> RFC 1918 ranges are:
+> *   `10.0.0.0/8`
+> *   `172.16.0.0/12`
+> *   `192.168.0.0/16`
+>
+> If a domain resolves to a public IP address, the Reasoning Engine will fail to reach it because traffic is forced through the PSC interface which only routes to the private network.
+
+To bypass this limitation and allow the agent to reach public internet URLs, you must use a proxy.
+
+---
+
+## Section 3: Proxy Configuration (Bypassing Limitations)
+
+If your agent needs to access the public internet but is restricted by the PSC interface, you can route traffic through a proxy running within your private network (on an RFC 1918 IP).
 
 ### Step 1: Add a Proxy Tool to your Agent
 
-Add a tool like this to your agent's code:
+Add a tool like this to your agent's code to route specific requests through the proxy:
 
 ```python
 def test_proxy_connectivity(target_url: str, proxy_ip: str = "10.1.0.2", port: int = 8080):
@@ -136,11 +148,7 @@ def test_proxy_connectivity(target_url: str, proxy_ip: str = "10.1.0.2", port: i
         return f"FAILED: Unable to reach {target_url} via proxy. Error: {e}"
 ```
 
-### Step 2: Verify Connectivity
-Invoke the agent asking it to use the tool to reach a public URL (e.g., `http://google.com`).
-
-*   **If it fails with Timeout to the proxy IP:** Check if the proxy is running and listening on the specified port, and that firewall rules allow traffic from the PSC subnet.
-*   **If it fails with Connection Refused from the proxy:** The proxy is reachable but rejecting the connection. Check proxy logs.
+---
 
 ## Troubleshooting
 
